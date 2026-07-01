@@ -1,7 +1,18 @@
+// ============================================================================
+// ast.c -- Abstract Syntax Tree Node Constructors / Destructors
+//
+// Each make_* function allocates an AstNode, sets its type tag and line
+// number, then fills in the type-specific fields from the arguments.
+// The free_* functions recursively deallocate an entire AST subtree.
+// ============================================================================
+
 #include "ast.h"
 #include <stdlib.h>
 #include <string.h>
 
+// ---------------------------------------------------------------------------
+// duplicate_string: malloc + memcpy a length-delimited string from source
+// ---------------------------------------------------------------------------
 static char* duplicate_string(const char* start, int length) {
     char* copy = malloc(length + 1);
     if (!copy) return NULL;
@@ -10,12 +21,16 @@ static char* duplicate_string(const char* start, int length) {
     return copy;
 }
 
+// ============================================================================
+// Expression constructors
+// ============================================================================
+
 AstNode* make_literal(Value val, int line) {
     AstNode* node = malloc(sizeof(AstNode));
     if (!node) return NULL;
     node->type = AST_LITERAL;
     node->line = line;
-    node->as.literal = val;
+    node->as.literal = val;       // Value is small; copy by value
     return node;
 }
 
@@ -25,7 +40,7 @@ AstNode* make_var_ref(const char* name, int length, int line) {
     node->type = AST_VAR_REF;
     node->line = line;
     node->as.var.name = duplicate_string(name, length);
-    node->as.var.initializer = NULL;
+    node->as.var.initializer = NULL;  // Unused for var refs
     return node;
 }
 
@@ -35,7 +50,7 @@ AstNode* make_assign_var(const char* name, int length, AstNode* value, int line)
     node->type = AST_ASSIGN_VAR;
     node->line = line;
     node->as.assign_var.name = duplicate_string(name, length);
-    node->as.assign_var.value = value;
+    node->as.assign_var.value = value;   // Takes ownership of the child node
     return node;
 }
 
@@ -108,9 +123,13 @@ AstNode* make_call(const char* callee, int length, AstNodeList* arguments, int l
     node->type = AST_CALL;
     node->line = line;
     node->as.call.callee = duplicate_string(callee, length);
-    node->as.call.arguments = arguments;
+    node->as.call.arguments = arguments;  // Takes ownership of the argument list
     return node;
 }
+
+// ============================================================================
+// Statement constructors
+// ============================================================================
 
 AstNode* make_expr_stmt(AstNode* expr, int line) {
     AstNode* node = malloc(sizeof(AstNode));
@@ -127,7 +146,7 @@ AstNode* make_var_decl(const char* name, int length, AstNode* initializer, int l
     node->type = AST_VAR_DECL;
     node->line = line;
     node->as.var.name = duplicate_string(name, length);
-    node->as.var.initializer = initializer;
+    node->as.var.initializer = initializer;   // NULL if no initializer
     return node;
 }
 
@@ -138,7 +157,7 @@ AstNode* make_fun_decl(const char* name, int length, ParamList* parameters, AstN
     node->line = line;
     node->as.fun_decl.name = duplicate_string(name, length);
     node->as.fun_decl.parameters = parameters;
-    node->as.fun_decl.body = body;
+    node->as.fun_decl.body = body;            // Should be AST_BLOCK
     return node;
 }
 
@@ -149,7 +168,7 @@ AstNode* make_if(AstNode* condition, AstNode* then_branch, AstNode* else_branch,
     node->line = line;
     node->as.if_stmt.condition = condition;
     node->as.if_stmt.then_branch = then_branch;
-    node->as.if_stmt.else_branch = else_branch;
+    node->as.if_stmt.else_branch = else_branch;  // NULL when no else clause
     return node;
 }
 
@@ -189,72 +208,96 @@ AstNode* make_return(AstNode* expr, int line) {
     if (!node) return NULL;
     node->type = AST_RETURN;
     node->line = line;
-    node->as.expr_stmt.expr = expr;
+    node->as.expr_stmt.expr = expr;   // NULL for bare `return;`
     return node;
 }
 
+// ============================================================================
+// free_ast -- recursively free an AstNode and all its descendants
+//
+// Each case frees any heap-allocated fields then calls free_ast on children.
+// The node struct itself is freed at the end (via free(node)).
+// ============================================================================
 void free_ast(AstNode* node) {
     if (!node) return;
     switch (node->type) {
         case AST_LITERAL:
-            // Value does not dynamic alloc.
+            // Value stores inline (no heap allocation to free)
             break;
+
         case AST_VAR_REF:
             free(node->as.var.name);
             break;
+
         case AST_ASSIGN_VAR:
             free(node->as.assign_var.name);
             free_ast(node->as.assign_var.value);
             break;
+
         case AST_DB_REF_ID:
+            // realNo is an int; nothing to free
             break;
+
         case AST_ASSIGN_DB_REF_ID:
             free_ast(node->as.assign_db_id.value);
             break;
+
         case AST_DB_REF_LINK:
+            // Three ints; nothing to free
             break;
+
         case AST_ASSIGN_DB_REF_LINK:
             free_ast(node->as.assign_db_link.value);
             break;
+
         case AST_BINARY:
             free_ast(node->as.binary.left);
             free_ast(node->as.binary.right);
             break;
+
         case AST_UNARY:
             free_ast(node->as.unary.operand);
             break;
+
         case AST_CALL:
             free(node->as.call.callee);
             free_ast_list(node->as.call.arguments);
             break;
+
         case AST_EXPR_STMT:
         case AST_RETURN:
             free_ast(node->as.expr_stmt.expr);
             break;
+
         case AST_VAR_DECL:
             free(node->as.var.name);
             free_ast(node->as.var.initializer);
             break;
+
         case AST_FUN_DECL:
             free(node->as.fun_decl.name);
             free_param_list(node->as.fun_decl.parameters);
             free_ast(node->as.fun_decl.body);
             break;
+
         case AST_IF:
             free_ast(node->as.if_stmt.condition);
             free_ast(node->as.if_stmt.then_branch);
             free_ast(node->as.if_stmt.else_branch);
             break;
+
         case AST_WHILE:
             free_ast(node->as.while_stmt.condition);
             free_ast(node->as.while_stmt.body);
             break;
+
         case AST_FOR:
             free_ast(node->as.for_stmt.initializer);
             free_ast(node->as.for_stmt.condition);
             free_ast(node->as.for_stmt.increment);
             free_ast(node->as.for_stmt.body);
             break;
+
         case AST_BLOCK:
             free_ast_list(node->as.block.statements);
             break;
@@ -262,6 +305,9 @@ void free_ast(AstNode* node) {
     free(node);
 }
 
+// ---------------------------------------------------------------------------
+// free_ast_list -- free a linked list of AstNode wrappers
+// ---------------------------------------------------------------------------
 void free_ast_list(AstNodeList* list) {
     while (list != NULL) {
         AstNodeList* next = list->next;
@@ -271,6 +317,9 @@ void free_ast_list(AstNodeList* list) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// free_param_list -- free a linked list of function parameters
+// ---------------------------------------------------------------------------
 void free_param_list(ParamList* list) {
     while (list != NULL) {
         ParamList* next = list->next;

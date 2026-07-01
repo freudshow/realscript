@@ -1,19 +1,67 @@
+// ============================================================================
+// parser.c -- Recursive-Descent Parser Implementation
+//
+// Grammar (in order of precedence, lowest first):
+//
+//   program        → declaration* EOF
+//   declaration    → var_decl | fun_decl | statement
+//   var_decl       → "var" IDENTIFIER ("=" expression)? ";"
+//   fun_decl       → "fn" IDENTIFIER "(" [params] ")" block
+//   statement      → if_stmt | while_stmt | for_stmt | return_stmt
+//                  | block | expr_stmt
+//   if_stmt        → "if" "(" expression ")" statement ("else" statement)?
+//   while_stmt     → "while" "(" expression ")" statement
+//   for_stmt       → "for" "(" [init] ";" [cond] ";" [incr] ")" statement
+//   return_stmt    → "return" expression? ";"
+//   block          → "{" declaration* "}"
+//   expr_stmt      → expression ";"
+//   expression     → assignment
+//   assignment     → logical_or ("=" assignment)?
+//   logical_or     → logical_and ("||" logical_and)*
+//   logical_and    → bitwise_or ("&&" bitwise_or)*
+//   bitwise_or     → bitwise_xor ("|" bitwise_xor)*
+//   bitwise_xor    → bitwise_and ("^" bitwise_and)*
+//   bitwise_and    → equality ("&" equality)*
+//   equality       → comparison (("==" | "!=") comparison)*
+//   comparison     → shift (("<" | "<=" | ">" | ">=") shift)*
+//   shift          → term (("<<" | ">>") term)*
+//   term           → factor (("+" | "-") factor)*
+//   factor         → unary (("*" | "/" | "%") unary)*
+//   unary          → ("!" | "~" | "-") unary | call
+//   call           → primary ("(" [args] ")")*
+//   primary        → "true" | "false" | "nil" | INT | DOUBLE
+//                  | IDENTIFIER | "#" INT | "#" "(" INT "," INT "," INT ")"
+//                  | "(" expression ")"
+//
+// Database reference syntax (RealScript-specific extension):
+//   #N         → flat-index database access
+//   #(L, D, R) → link-device-register database access
+// ============================================================================
+
 #include "parser.h"
 #include "lexer.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+// ---------------------------------------------------------------------------
+// ParserState -- tracks where we are in the token stream and error status
+//
+//   current   : the token we are about to process
+//   previous  : the token we just processed (peekable for match/consume)
+//   hadError  : set when any error occurs; causes parse() to return NULL
+//   panicMode : after an error, skip tokens until a statement boundary
+// ---------------------------------------------------------------------------
 typedef struct {
-    Token current;
-    Token previous;
-    bool hadError;
-    bool panicMode;
+    Token current;         // The token currently being looked at
+    Token previous;        // The last consumed token
+    bool hadError;         // True if any error has occurred
+    bool panicMode;        // True while in error-recovery mode
 } ParserState;
 
 static ParserState parser;
 
-// Forward declarations of CFG functions
+// Forward declarations (recursive descent requires mutual recursion)
 static AstNode* declaration(void);
 static AstNode* statement(void);
 static AstNode* var_decl(void);
@@ -41,15 +89,20 @@ static AstNode* unary(void);
 static AstNode* call(void);
 static AstNode* primary(void);
 
+// ============================================================================
+// Error handling
+// ============================================================================
+
+// error_at: report an error at a specific token, then enter panic mode
 static void error_at(Token* token, const char* message) {
-    if (parser.panicMode) return;
+    if (parser.panicMode) return;              // Already recovering
     parser.panicMode = true;
     fprintf(stderr, "[Line %d] Error", token->line);
 
     if (token->type == TOKEN_EOF) {
         fprintf(stderr, " at end");
     } else if (token->type == TOKEN_ERROR) {
-        // Nothing
+        // The lexer already printed the message; just print the error prefix
     } else {
         fprintf(stderr, " at '%.*s'", token->length, token->start);
     }
@@ -58,35 +111,45 @@ static void error_at(Token* token, const char* message) {
     parser.hadError = true;
 }
 
+// error: report at the previous token
 static void error(const char* message) {
     error_at(&parser.previous, message);
 }
 
+// error_at_current: report at the current token
 static void error_at_current(const char* message) {
     error_at(&parser.current, message);
 }
 
+// ============================================================================
+// Token stream management
+// ============================================================================
+
+// advance: consume the current token and fetch the next one from the lexer
 static void advance(void) {
     parser.previous = parser.current;
 
+    // Skip over any error tokens produced by the lexer
     for (;;) {
         parser.current = next_token();
         if (parser.current.type != TOKEN_ERROR) break;
-
         error_at_current(parser.current.start);
     }
 }
 
+// check: see if the current token has a given type (without consuming)
 static bool check(TokenType type) {
     return parser.current.type == type;
 }
 
+// match_token: if current token matches, consume and return true
 static bool match_token(TokenType type) {
     if (!check(type)) return false;
     advance();
     return true;
 }
 
+// consume: expect a token type; if found, advance; otherwise error
 static void consume(TokenType type, const char* message) {
     if (parser.current.type == type) {
         advance();
@@ -95,10 +158,18 @@ static void consume(TokenType type, const char* message) {
     error_at_current(message);
 }
 
+// ============================================================================
+// synchronize -- panic-mode error recovery
+//
+// Discard tokens until we hit a statement boundary (semicolon or a keyword
+// that starts a new statement/declaration).  This prevents a single error
+// from producing cascading nonsense messages.
+// ============================================================================
 static void synchronize(void) {
     parser.panicMode = false;
 
     while (parser.current.type != TOKEN_EOF) {
+        // If the previous token was a semicolon, we're at a statement boundary
         if (parser.previous.type == TOKEN_SEMICOLON) return;
 
         switch (parser.current.type) {
@@ -108,9 +179,8 @@ static void synchronize(void) {
             case TOKEN_WHILE:
             case TOKEN_FOR:
             case TOKEN_RETURN:
-                return;
+                return;   // These start a new top-level construct
             default:
-                // Do nothing.
                 break;
         }
 
@@ -118,6 +188,9 @@ static void synchronize(void) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// atoi_from_token: convert a Token's text to int (for database reference #N)
+// ---------------------------------------------------------------------------
 static int atoi_from_token(Token token) {
     char buf[64];
     int len = token.length > 63 ? 63 : token.length;
@@ -126,13 +199,21 @@ static int atoi_from_token(Token token) {
     return atoi(buf);
 }
 
+// ============================================================================
+// parse -- entry point
+//
+// Initialises the lexer and parser state, then loops over declarations
+// until EOF, collecting them into an AstNodeList.
+// Returns NULL on any parse error (with messages printed to stderr).
+// ============================================================================
 AstNodeList* parse(const char* source) {
     init_lexer(source);
     parser.hadError = false;
     parser.panicMode = false;
 
-    advance(); // Load the first token
+    advance(); // Load the first token from the lexer
 
+    // Build the top-level statement list
     AstNodeList* head = NULL;
     AstNodeList* tail = NULL;
 
@@ -160,6 +241,9 @@ AstNodeList* parse(const char* source) {
     return head;
 }
 
+// ============================================================================
+// declaration  → var_decl | fun_decl | statement
+// ============================================================================
 static AstNode* declaration(void) {
     AstNode* decl = NULL;
     if (match_token(TOKEN_VAR)) {
@@ -170,29 +254,37 @@ static AstNode* declaration(void) {
         decl = statement();
     }
 
-    if (parser.panicMode) synchronize();
+    if (parser.panicMode) synchronize();  // Error recovery after failed parse
     return decl;
 }
 
+// ============================================================================
+// var_decl  → "var" IDENTIFIER ("=" expression)? ";"
+// ============================================================================
 static AstNode* var_decl(void) {
     consume(TOKEN_IDENTIFIER, "Expect variable name.");
     Token nameToken = parser.previous;
 
     AstNode* initializer = NULL;
     if (match_token(TOKEN_EQUAL)) {
-        initializer = expression();
+        initializer = expression();       // Optional initialiser
     }
 
     consume(TOKEN_SEMICOLON, "Expect ';' after variable declaration.");
     return make_var_decl(nameToken.start, nameToken.length, initializer, nameToken.line);
 }
 
+// ============================================================================
+// fun_decl  → "fn" IDENTIFIER "(" [params] ")" block
+//   params  → IDENTIFIER ("," IDENTIFIER)*
+// ============================================================================
 static AstNode* fun_decl(void) {
     consume(TOKEN_IDENTIFIER, "Expect function name.");
     Token nameToken = parser.previous;
 
     consume(TOKEN_LEFT_PAREN, "Expect '(' after function name.");
 
+    // Parse comma-separated parameter list
     ParamList* head = NULL;
     ParamList* tail = NULL;
 
@@ -218,30 +310,26 @@ static AstNode* fun_decl(void) {
     consume(TOKEN_RIGHT_PAREN, "Expect ')' after parameters.");
     consume(TOKEN_LEFT_BRACE, "Expect '{' before function body.");
 
-    AstNode* body = block();
+    AstNode* body = block();  // Parse the function body (which consumes '}')
 
     return make_fun_decl(nameToken.start, nameToken.length, head, body, nameToken.line);
 }
 
+// ============================================================================
+// statement  → if_stmt | while_stmt | for_stmt | return_stmt | block | expr_stmt
+// ============================================================================
 static AstNode* statement(void) {
-    if (match_token(TOKEN_IF)) {
-        return if_stmt();
-    }
-    if (match_token(TOKEN_WHILE)) {
-        return while_stmt();
-    }
-    if (match_token(TOKEN_FOR)) {
-        return for_stmt();
-    }
-    if (match_token(TOKEN_RETURN)) {
-        return return_stmt();
-    }
-    if (match_token(TOKEN_LEFT_BRACE)) {
-        return block();
-    }
+    if (match_token(TOKEN_IF))    return if_stmt();
+    if (match_token(TOKEN_WHILE)) return while_stmt();
+    if (match_token(TOKEN_FOR))   return for_stmt();
+    if (match_token(TOKEN_RETURN)) return return_stmt();
+    if (match_token(TOKEN_LEFT_BRACE)) return block();
     return expr_stmt();
 }
 
+// ============================================================================
+// if_stmt  → "if" "(" expression ")" statement ("else" statement)?
+// ============================================================================
 static AstNode* if_stmt(void) {
     int line = parser.previous.line;
     consume(TOKEN_LEFT_PAREN, "Expect '(' after 'if'.");
@@ -257,6 +345,9 @@ static AstNode* if_stmt(void) {
     return make_if(condition, thenBranch, elseBranch, line);
 }
 
+// ============================================================================
+// while_stmt  → "while" "(" expression ")" statement
+// ============================================================================
 static AstNode* while_stmt(void) {
     int line = parser.previous.line;
     consume(TOKEN_LEFT_PAREN, "Expect '(' after 'while'.");
@@ -267,25 +358,34 @@ static AstNode* while_stmt(void) {
     return make_while(condition, body, line);
 }
 
+// ============================================================================
+// for_stmt  → "for" "(" [init] ";" [cond] ";" [incr] ")" statement
+//
+// Each of init, cond, incr may be omitted (represented as NULL in the AST).
+// init may be a var_decl, an expr_stmt, or empty (just ";").
+// ============================================================================
 static AstNode* for_stmt(void) {
     int line = parser.previous.line;
     consume(TOKEN_LEFT_PAREN, "Expect '(' after 'for'.");
 
+    // --- Initialiser clause ---
     AstNode* initializer = NULL;
     if (match_token(TOKEN_SEMICOLON)) {
-        initializer = NULL;
+        initializer = NULL;                     // Empty init
     } else if (match_token(TOKEN_VAR)) {
-        initializer = var_decl(); // var_decl parses internal semicolon
+        initializer = var_decl();               // var_decl consumes its ';'
     } else {
-        initializer = expr_stmt(); // expr_stmt parses internal semicolon
+        initializer = expr_stmt();              // expr_stmt consumes its ';'
     }
 
+    // --- Condition clause ---
     AstNode* condition = NULL;
     if (!match_token(TOKEN_SEMICOLON)) {
         condition = expression();
         consume(TOKEN_SEMICOLON, "Expect ';' after loop condition.");
     }
 
+    // --- Increment clause ---
     AstNode* increment = NULL;
     if (!check(TOKEN_RIGHT_PAREN)) {
         increment = expression();
@@ -297,6 +397,9 @@ static AstNode* for_stmt(void) {
     return make_for(initializer, condition, increment, body, line);
 }
 
+// ============================================================================
+// return_stmt  → "return" expression? ";"
+// ============================================================================
 static AstNode* return_stmt(void) {
     int line = parser.previous.line;
     AstNode* expr = NULL;
@@ -307,6 +410,9 @@ static AstNode* return_stmt(void) {
     return make_return(expr, line);
 }
 
+// ============================================================================
+// block  → "{" declaration* "}"
+// ============================================================================
 static AstNode* block(void) {
     int line = parser.previous.line;
     AstNodeList* head = NULL;
@@ -332,6 +438,9 @@ static AstNode* block(void) {
     return make_block(head, line);
 }
 
+// ============================================================================
+// expr_stmt  → expression ";"
+// ============================================================================
 static AstNode* expr_stmt(void) {
     int line = parser.current.line;
     AstNode* expr = expression();
@@ -339,22 +448,31 @@ static AstNode* expr_stmt(void) {
     return make_expr_stmt(expr, line);
 }
 
+// ============================================================================
+// expression  → assignment
+// ============================================================================
 static AstNode* expression(void) {
     return assignment();
 }
 
+// ============================================================================
+// assignment  → logical_or ("=" assignment)?
+//
+// The left-hand side must be a valid lvalue (variable ref or db ref).
+// We detect this by checking the type of the already-parsed left-hand expr.
+// ============================================================================
 static AstNode* assignment(void) {
     AstNode* expr = logical_or();
 
     if (match_token(TOKEN_EQUAL)) {
         Token equals = parser.previous;
-        AstNode* value = assignment();
+        AstNode* value = assignment();  // Right-associative
 
+        // Convert the var_ref / db_ref node into an assignment node
         if (expr->type == AST_VAR_REF) {
             char* name = expr->as.var.name;
             AstNode* assignNode = make_assign_var(name, (int)strlen(name), value, equals.line);
-            // Free the temporary var ref node (only the shell struct; name is reused by assignNode)
-            free(expr);
+            free(expr);  // Free the ref shell; the name pointer is reused
             return assignNode;
         } else if (expr->type == AST_DB_REF_ID) {
             int realNo = expr->as.db_ref_id.realNo;
@@ -376,6 +494,11 @@ static AstNode* assignment(void) {
     return expr;
 }
 
+// ============================================================================
+// Operator precedence:  each level is a Pratt-like left-associative loop
+// ============================================================================
+
+// logical_or  → logical_and ("||" logical_and)*
 static AstNode* logical_or(void) {
     AstNode* expr = logical_and();
     while (match_token(TOKEN_PIPE_PIPE)) {
@@ -386,6 +509,7 @@ static AstNode* logical_or(void) {
     return expr;
 }
 
+// logical_and  → bitwise_or ("&&" bitwise_or)*
 static AstNode* logical_and(void) {
     AstNode* expr = bitwise_or();
     while (match_token(TOKEN_AMPERSAND_AMPERSAND)) {
@@ -396,6 +520,7 @@ static AstNode* logical_and(void) {
     return expr;
 }
 
+// bitwise_or  → bitwise_xor ("|" bitwise_xor)*
 static AstNode* bitwise_or(void) {
     AstNode* expr = bitwise_xor();
     while (match_token(TOKEN_PIPE)) {
@@ -406,6 +531,7 @@ static AstNode* bitwise_or(void) {
     return expr;
 }
 
+// bitwise_xor  → bitwise_and ("^" bitwise_and)*
 static AstNode* bitwise_xor(void) {
     AstNode* expr = bitwise_and();
     while (match_token(TOKEN_CARET)) {
@@ -416,6 +542,7 @@ static AstNode* bitwise_xor(void) {
     return expr;
 }
 
+// bitwise_and  → equality ("&" equality)*
 static AstNode* bitwise_and(void) {
     AstNode* expr = equality();
     while (match_token(TOKEN_AMPERSAND)) {
@@ -426,6 +553,7 @@ static AstNode* bitwise_and(void) {
     return expr;
 }
 
+// equality  → comparison (("==" | "!=") comparison)*
 static AstNode* equality(void) {
     AstNode* expr = comparison();
     while (match_token(TOKEN_EQUAL_EQUAL) || match_token(TOKEN_BANG_EQUAL)) {
@@ -436,6 +564,7 @@ static AstNode* equality(void) {
     return expr;
 }
 
+// comparison  → shift (("<" | "<=" | ">" | ">=") shift)*
 static AstNode* comparison(void) {
     AstNode* expr = shift();
     while (match_token(TOKEN_LESS) || match_token(TOKEN_LESS_EQUAL) ||
@@ -447,6 +576,7 @@ static AstNode* comparison(void) {
     return expr;
 }
 
+// shift  → term (("<<" | ">>") term)*
 static AstNode* shift(void) {
     AstNode* expr = term();
     while (match_token(TOKEN_LESS_LESS) || match_token(TOKEN_GREATER_GREATER)) {
@@ -457,6 +587,7 @@ static AstNode* shift(void) {
     return expr;
 }
 
+// term  → factor (("+" | "-") factor)*
 static AstNode* term(void) {
     AstNode* expr = factor();
     while (match_token(TOKEN_PLUS) || match_token(TOKEN_MINUS)) {
@@ -467,6 +598,7 @@ static AstNode* term(void) {
     return expr;
 }
 
+// factor  → unary (("*" | "/" | "%") unary)*
 static AstNode* factor(void) {
     AstNode* expr = unary();
     while (match_token(TOKEN_STAR) || match_token(TOKEN_SLASH) || match_token(TOKEN_PERCENT)) {
@@ -477,20 +609,32 @@ static AstNode* factor(void) {
     return expr;
 }
 
+// ============================================================================
+// unary  → ("!" | "~" | "-") unary | call
+// ============================================================================
 static AstNode* unary(void) {
     if (match_token(TOKEN_BANG) || match_token(TOKEN_TILDE) || match_token(TOKEN_MINUS)) {
         TokenType op = parser.previous.type;
-        AstNode* operand = unary();
+        AstNode* operand = unary();   // Right-associative nesting
         return make_unary(op, operand, parser.previous.line);
     }
     return call();
 }
 
+// ============================================================================
+// call  → primary ("(" [expression ("," expression)*] ")")*
+//
+// Handles function calls like  foo()  foo(a)  foo(a, b, c)
+// Can be chained (though the language currently only supports direct calls
+// by name, not method calls on arbitrary expressions).
+// ============================================================================
 static AstNode* call(void) {
     AstNode* expr = primary();
 
     for (;;) {
         if (match_token(TOKEN_LEFT_PAREN)) {
+            // Only allow calls on variable references (not on literals or
+            // arbitrary expressions)
             if (expr->type != AST_VAR_REF) {
                 error("Can only call functions directly by name.");
                 free_ast(expr);
@@ -522,7 +666,7 @@ static AstNode* call(void) {
 
             char* calleeName = expr->as.var.name;
             AstNode* callNode = make_call(calleeName, (int)strlen(calleeName), head, nameToken.line);
-            free(expr); // Free the shell var_ref node
+            free(expr);  // Free the var_ref shell (name pointer is reused)
             expr = callNode;
         } else {
             break;
@@ -532,11 +676,19 @@ static AstNode* call(void) {
     return expr;
 }
 
+// ============================================================================
+// primary  → "true" | "false" | "nil"
+//          | INT | DOUBLE | IDENTIFIER
+//          | "#" INT | "#" "(" INT "," INT "," INT ")"
+//          | "(" expression ")"
+// ============================================================================
 static AstNode* primary(void) {
+    // Keyword literals
     if (match_token(TOKEN_FALSE)) return make_literal(bool_val(false), parser.previous.line);
-    if (match_token(TOKEN_TRUE)) return make_literal(bool_val(true), parser.previous.line);
-    if (match_token(TOKEN_NIL)) return make_literal(nil_val(), parser.previous.line);
+    if (match_token(TOKEN_TRUE))  return make_literal(bool_val(true), parser.previous.line);
+    if (match_token(TOKEN_NIL))   return make_literal(nil_val(), parser.previous.line);
 
+    // Integer literal (e.g. 42)
     if (match_token(TOKEN_INT)) {
         char buf[128];
         int len = parser.previous.length > 127 ? 127 : parser.previous.length;
@@ -546,6 +698,7 @@ static AstNode* primary(void) {
         return make_literal(int_val(val), parser.previous.line);
     }
 
+    // Double literal (e.g. 3.14)
     if (match_token(TOKEN_DOUBLE)) {
         char buf[128];
         int len = parser.previous.length > 127 ? 127 : parser.previous.length;
@@ -555,16 +708,19 @@ static AstNode* primary(void) {
         return make_literal(double_val(val), parser.previous.line);
     }
 
+    // Variable reference
     if (match_token(TOKEN_IDENTIFIER)) {
         return make_var_ref(parser.previous.start, parser.previous.length, parser.previous.line);
     }
 
+    // Database references:  #N  or  #(L, D, R)
     if (match_token(TOKEN_HASH)) {
-        // Database Reference: #32 or #(3, 45, 12)
         if (match_token(TOKEN_INT)) {
+            // Flat-index form: #32
             int realNo = atoi_from_token(parser.previous);
             return make_db_ref_id(realNo, parser.previous.line);
         } else if (match_token(TOKEN_LEFT_PAREN)) {
+            // Tuple form: #(3, 45, 12)
             consume(TOKEN_INT, "Expect integer linkNo in database reference.");
             int linkNo = atoi_from_token(parser.previous);
             consume(TOKEN_COMMA, "Expect ',' after linkNo.");
@@ -581,12 +737,14 @@ static AstNode* primary(void) {
         }
     }
 
+    // Parenthesised expression (grouping)
     if (match_token(TOKEN_LEFT_PAREN)) {
         AstNode* expr = expression();
         consume(TOKEN_RIGHT_PAREN, "Expect ')' after expression.");
         return expr;
     }
 
+    // Nothing matched — syntax error
     error("Expect expression.");
     return NULL;
 }

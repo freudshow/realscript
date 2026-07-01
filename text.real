@@ -1,0 +1,27 @@
+// ============================================================================
+// text.real -- Example RealScript source file
+//
+// This file can be run with:  ./realscript text.real
+//
+// The RealScript language supports:
+//   - Variables:        var name = expression;
+//   - Arithmetic:       + - * / %
+//   - Bitwise:          & | ^ ~ << >>
+//   - Logical:          && || !
+//   - Comparison:       == != < > <= >=
+//   - Control flow:     if/else, while, for
+//   - Functions:        fn name(params) { body; return expr; }
+//   - DB access:        #N  and  #(L, D, R)  for reads/writes
+// ============================================================================
+
+// Example: calculate the 10th triangular number
+var sum = 0;
+var i = 1;
+while (i <= 10) {
+    sum = sum + i;
+    i = i + 1;
+}
+
+// Write and read from the mock database
+#42 = 3.14159;
+var pi = #42;
