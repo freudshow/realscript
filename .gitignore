@@ -57,3 +57,11 @@ dkms.conf
 realscript
 
 .settings/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+cmake-build-*/
