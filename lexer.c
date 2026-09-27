@@ -218,8 +218,17 @@ static Token number(void) {
     return make_token(is_double ? TOKEN_DOUBLE : TOKEN_INT);
 }
 
-// ============================================================================
-// next_token -- the main entry point: return the next token from the source
+static Token string_token(void) {
+    while (peek() != '"' && !is_at_end()) {
+        if (peek() == '\n') lexer.line++;
+        if (peek() == '\\' && peek_next() != '\0') advance();
+        advance();
+    }
+    if (is_at_end()) return error_token("Unterminated string.");
+    advance();
+    return make_token(TOKEN_STRING);
+}
+
 //
 // Called repeatedly by the parser to obtain the token stream.
 // ============================================================================
@@ -245,6 +254,10 @@ Token next_token(void) {
         case ',': return make_token(TOKEN_COMMA);
         case ';': return make_token(TOKEN_SEMICOLON);
         case '#': return make_token(TOKEN_HASH);
+        case '[': return make_token(TOKEN_LEFT_BRACKET);
+        case ']': return make_token(TOKEN_RIGHT_BRACKET);
+        case '.': return make_token(TOKEN_DOT);
+        case '"': return string_token();
         case '+': return make_token(TOKEN_PLUS);
         case '-': return make_token(TOKEN_MINUS);
         case '*': return make_token(TOKEN_STAR);

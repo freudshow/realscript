@@ -18,6 +18,7 @@
 #define VALUE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 // ---------------------------------------------------------------------------
@@ -28,7 +29,12 @@ typedef enum {
     VAL_DOUBLE,  // 64-bit IEEE 754 double
     VAL_BOOL,    // boolean (true/false)
     VAL_NIL,     // null / undefined sentinel
-    VAL_FUNC,    // heap-allocated ObjFunction pointer (stored in .as.obj)
+    VAL_FUNC,
+    VAL_NATIVE,
+    VAL_STRING,
+    VAL_BYTES,
+    VAL_ARRAY,
+    VAL_RESULT,
 } ValueType;
 
 // ---------------------------------------------------------------------------
@@ -37,15 +43,22 @@ typedef enum {
 // Uses a tagged union to save memory: the union is large enough to hold the
 // largest member (void* on 64-bit = 8 bytes, matching int64_t and double).
 // ---------------------------------------------------------------------------
-typedef struct {
-    ValueType type;   // Which variant this Value currently holds
+typedef struct Value Value;
+typedef Value (*NativeFn)(void *context, int argc, const Value *argv);
+typedef struct { size_t length; uint8_t *data; } ObjBytes;
+typedef struct { size_t count; Value *items; } ObjArray;
+typedef struct { bool ok; int code; char *message; } ObjResult;
+
+struct Value {
+    ValueType type;
     union {
         int64_t integer;   // Used by VAL_INT
         double real;       // Used by VAL_DOUBLE
         bool boolean;      // Used by VAL_BOOL
-        void* obj;         // Used by VAL_FUNC (points to an ObjFunction)
+        void* obj;
+        NativeFn native;
     } as;
-} Value;
+};
 
 // ---------------------------------------------------------------------------
 // Constructors -- create a Value from a native C value
@@ -54,6 +67,13 @@ Value int_val(int64_t val);
 Value double_val(double val);
 Value bool_val(bool val);
 Value nil_val(void);
+Value native_val(NativeFn function);
+Value string_val(const char *text, size_t length);
+Value bytes_val(const uint8_t *data, size_t length);
+Value array_val(size_t count, const Value *items);
+Value array_literal_val(size_t count, const Value *items);
+Value result_val(bool ok, int code, const char *message);
+Value free_value(Value value);
 
 // ---------------------------------------------------------------------------
 // Runtime helpers
@@ -65,7 +85,9 @@ bool is_truthy(Value val);        // Truthiness: 0/nil/false → false; else tru
 // Type-coercion helpers  -- convert any Value to int or double
 // ---------------------------------------------------------------------------
 int64_t as_int(Value val);
+int64_t as_int(Value val);
 double as_double(Value val);
+bool value_get_field(Value object, const char* name, Value* result);
 
 // ---------------------------------------------------------------------------
 // Arithmetic operators

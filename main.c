@@ -19,13 +19,14 @@
 #include <string.h>
 #include "parser.h"
 #include "compiler.h"
-#include "vm.h"
+#include "ttu_script_runtime.h"
 #include "db.h"
 
 // ---------------------------------------------------------------------------
 // run_source — full pipeline: parse → compile → execute → print globals
 // ---------------------------------------------------------------------------
 static void run_source(const char* source) {
+    ttu_script_register_core_natives();
     // Step 1: Parse source into AST
     AstNodeList* ast = parse(source);
     if (ast == NULL) {
@@ -44,6 +45,7 @@ static void run_source(const char* source) {
     // Step 3: Create VM and execute the compiled function
     VM vm;
     init_vm(&vm);
+    vm.capabilities = TTU_CAP_RTD_READ | TTU_CAP_RTD_WRITE | TTU_CAP_LOG;
 
     InterpretResult result = interpret(&vm, function);
 

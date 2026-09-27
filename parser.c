@@ -43,6 +43,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 // ---------------------------------------------------------------------------
 // ParserState -- tracks where we are in the token stream and error status
@@ -88,6 +89,7 @@ static AstNode* factor(void);
 static AstNode* unary(void);
 static AstNode* call(void);
 static AstNode* primary(void);
+static AstNode* finish_call(AstNode* callee, const char* name, int line);
 
 // ============================================================================
 // Error handling
@@ -621,63 +623,66 @@ static AstNode* unary(void) {
     return call();
 }
 
-// ============================================================================
-// call  → primary ("(" [expression ("," expression)*] ")")*
+static AstNode* finish_call(AstNode* callee, const char* name, int line)
+{
+    AstNodeList* head = NULL;
+    AstNodeList* tail = NULL;
+    if (!check(TOKEN_RIGHT_PAREN)) {
+        do {
+            AstNode* arg = expression();
+            AstNodeList* item = malloc(sizeof(AstNodeList));
+            if (item == NULL) { free_ast_list(head); free_ast(callee); return NULL; }
+            item->node = arg; item->next = NULL;
+            if (head == NULL) head = item; else tail->next = item;
+            tail = item;
+        } while (match_token(TOKEN_COMMA));
+    }
+    consume(TOKEN_RIGHT_PAREN, "Expect ')' after arguments.");
+    free_ast(callee);
+    return make_call(name, (int)strlen(name), head, line);
+}
+
 //
 // Handles function calls like  foo()  foo(a)  foo(a, b, c)
 // Can be chained (though the language currently only supports direct calls
 // by name, not method calls on arbitrary expressions).
 // ============================================================================
-static AstNode* call(void) {
+static AstNode* call(void)
+{
     AstNode* expr = primary();
-
-    for (;;) {
-        if (match_token(TOKEN_LEFT_PAREN)) {
-            // Only allow calls on variable references (not on literals or
-            // arbitrary expressions)
-            if (expr->type != AST_VAR_REF) {
-                error("Can only call functions directly by name.");
+    char name[256];
+    int length;
+    if (expr == NULL) return NULL;
+    if (expr->type == AST_VAR_REF) {
+        length = snprintf(name, sizeof(name), "%s", expr->as.var.name);
+        while (length > 0 && match_token(TOKEN_DOT)) {
+            Token member;
+            consume(TOKEN_IDENTIFIER, "Expect module/function name after '.'.");
+            member = parser.previous;
+            if (length < 0 || length + member.length + 1 >= (int)sizeof(name)) {
+                error("Qualified function name is too long.");
                 free_ast(expr);
                 return NULL;
             }
-
-            Token nameToken = parser.previous;
-            AstNodeList* head = NULL;
-            AstNodeList* tail = NULL;
-
-            if (!check(TOKEN_RIGHT_PAREN)) {
-                do {
-                    AstNode* arg = expression();
-                    AstNodeList* argNode = malloc(sizeof(AstNodeList));
-                    argNode->node = arg;
-                    argNode->next = NULL;
-
-                    if (head == NULL) {
-                        head = argNode;
-                        tail = argNode;
-                    } else {
-                        tail->next = argNode;
-                        tail = argNode;
-                    }
-                } while (match_token(TOKEN_COMMA));
-            }
-
-            consume(TOKEN_RIGHT_PAREN, "Expect ')' after arguments.");
-
-            char* calleeName = expr->as.var.name;
-            AstNode* callNode = make_call(calleeName, (int)strlen(calleeName), head, nameToken.line);
-            free(expr);  // Free the var_ref shell (name pointer is reused)
-            expr = callNode;
-        } else {
-            break;
+            name[length++] = '.';
+            memcpy(name + length, member.start, (size_t)member.length);
+            length += member.length;
+            name[length] = '\0';
         }
+        if (match_token(TOKEN_LEFT_PAREN)) return finish_call(expr, name, parser.previous.line);
+        return expr;
     }
-
+    while (match_token(TOKEN_DOT)) {
+        consume(TOKEN_IDENTIFIER, "Expect field name after '.'.");
+        AstNode* field = make_field(parser.previous.start, parser.previous.length, expr, parser.previous.line);
+        expr = field;
+    }
+    if (match_token(TOKEN_LEFT_PAREN)) { error("Only named function calls are supported."); free_ast(expr); return NULL; }
     return expr;
 }
 
 // ============================================================================
-// primary  → "true" | "false" | "nil"
+// primary
 //          | INT | DOUBLE | IDENTIFIER
 //          | "#" INT | "#" "(" INT "," INT "," INT ")"
 //          | "(" expression ")"

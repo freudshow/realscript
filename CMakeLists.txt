@@ -30,6 +30,7 @@ set(SOURCES
     ast.c
     parser.c
     compiler.c
+    ttu_script_runtime.c
     vm.c
     main.c
 )

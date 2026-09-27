@@ -17,12 +17,19 @@
 
 #include "compiler.h"
 #include "value.h"
+#include <stdint.h>
 
-// ---------------------------------------------------------------------------
-// Limits
-// ---------------------------------------------------------------------------
-#define FRAMES_MAX  64         // Maximum call-stack depth (nested calls)
-#define STACK_MAX   (FRAMES_MAX * 256)  // 16384 — total value stack size
+typedef struct TTUScriptHostAPI TTUScriptHostAPI;
+
+
+#define FRAMES_MAX 64
+#define STACK_MAX (FRAMES_MAX * 256)
+#define TTU_CAP_RTD_READ (1u << 0)
+#define TTU_CAP_RTD_WRITE (1u << 1)
+#define TTU_CAP_YK_PREPARE (1u << 4)
+#define TTU_CAP_YK_EXECUTE (1u << 5)
+#define TTU_CAP_YK_CANCEL (1u << 6)
+#define TTU_CAP_LOG (1u << 16)
 
 // ---------------------------------------------------------------------------
 // CallFrame — represents one active function invocation
@@ -54,6 +61,12 @@ typedef struct {
     Value* stackTop;                // Points to the next free stack slot
 
     Value globals[512];             // Global variable array (indexed by name)
+    const TTUScriptHostAPI* host;
+    void* host_context;
+    uint32_t capabilities;
+    int instruction_budget;
+    int executed_instructions;
+    const char* script_name;
 } VM;
 
 // ---------------------------------------------------------------------------
@@ -68,8 +81,11 @@ typedef enum {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
-void init_vm(VM* vm);                       // Set up a fresh VM state
-void free_vm(VM* vm);                       // Clean up VM resources
+void init_vm(VM* vm);
+void init_vm_with_host(VM* vm, const TTUScriptHostAPI* host, void* host_context,
+                       uint32_t capabilities, const char* script_name);
+void vm_set_instruction_budget(VM* vm, int budget);
+void free_vm(VM* vm);
 InterpretResult interpret(VM* vm, ObjFunction* function);  // Execute a function
 
 #endif // VM_H

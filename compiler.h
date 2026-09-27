@@ -64,8 +64,11 @@ typedef enum {
     OP_LOOP,              // Loop backward jump     (operand: int16 offset)
 
     // ---- Functions ----
-    OP_CALL,              // Call a function        (operand: byte arg count)
-    OP_RETURN             // Return from function   (no operand)
+    OP_CALL,
+    OP_CALL_NATIVE,
+    OP_GET_FIELD,
+    OP_INDEX,
+    OP_RETURN
 } OpCode;
 
 // ---------------------------------------------------------------------------

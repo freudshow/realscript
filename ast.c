@@ -34,13 +34,22 @@ AstNode* make_literal(Value val, int line) {
     return node;
 }
 
+AstNode* make_array_literal(ValueList *items, int line) {
+    AstNode* node = malloc(sizeof(AstNode));
+    if (node == NULL) return NULL;
+    node->type = AST_ARRAY_LITERAL;
+    node->line = line;
+    node->as.array_literal.items = items;
+    return node;
+}
+
 AstNode* make_var_ref(const char* name, int length, int line) {
     AstNode* node = malloc(sizeof(AstNode));
-    if (!node) return NULL;
+    if (node == NULL) return NULL;
     node->type = AST_VAR_REF;
     node->line = line;
     node->as.var.name = duplicate_string(name, length);
-    node->as.var.initializer = NULL;  // Unused for var refs
+    node->as.var.initializer = NULL;
     return node;
 }
 
@@ -117,13 +126,23 @@ AstNode* make_unary(TokenType op, AstNode* operand, int line) {
     return node;
 }
 
+AstNode* make_field(const char* name, int length, AstNode* object, int line) {
+    AstNode* node = malloc(sizeof(AstNode));
+    if (node == NULL) return NULL;
+    node->type = AST_FIELD;
+    node->line = line;
+    node->as.field.name = duplicate_string(name, length);
+    node->as.field.object = object;
+    return node;
+}
+
 AstNode* make_call(const char* callee, int length, AstNodeList* arguments, int line) {
     AstNode* node = malloc(sizeof(AstNode));
-    if (!node) return NULL;
+    if (node == NULL) return NULL;
     node->type = AST_CALL;
     node->line = line;
     node->as.call.callee = duplicate_string(callee, length);
-    node->as.call.arguments = arguments;  // Takes ownership of the argument list
+    node->as.call.arguments = arguments;
     return node;
 }
 
@@ -222,7 +241,12 @@ void free_ast(AstNode* node) {
     if (!node) return;
     switch (node->type) {
         case AST_LITERAL:
-            // Value stores inline (no heap allocation to free)
+            // Constants are owned by the function constant pool after compilation.
+            break;
+        case AST_ARRAY_LITERAL:
+            free_value_list(node->as.array_literal.items);
+            break;
+            free_value_list(node->as.array_literal.items);
             break;
 
         case AST_VAR_REF:
@@ -259,6 +283,10 @@ void free_ast(AstNode* node) {
             free_ast(node->as.unary.operand);
             break;
 
+        case AST_FIELD:
+            free_ast(node->as.field.object);
+            free(node->as.field.name);
+            break;
         case AST_CALL:
             free(node->as.call.callee);
             free_ast_list(node->as.call.arguments);
@@ -317,8 +345,31 @@ void free_ast_list(AstNodeList* list) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// free_param_list -- free a linked list of function parameters
+ValueList* copy_value_list(const ValueList *items) {
+    ValueList* head = NULL;
+    ValueList* tail = NULL;
+    while (items != NULL) {
+        ValueList* entry = malloc(sizeof(ValueList));
+        if (entry == NULL) { free_value_list(head); return NULL; }
+        entry->value = items->value;
+        entry->next = NULL;
+        if (head == NULL) head = entry;
+        else tail->next = entry;
+        tail = entry;
+        items = items->next;
+    }
+    return head;
+}
+
+void free_value_list(ValueList *items) {
+    while (items != NULL) {
+        ValueList *next = items->next;
+        free_value(items->value);
+        free(items);
+        items = next;
+    }
+}
+
 // ---------------------------------------------------------------------------
 void free_param_list(ParamList* list) {
     while (list != NULL) {

@@ -12,6 +12,8 @@
 
 #include "value.h"
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 // ============================================================================
 // Value constructors
@@ -38,11 +40,114 @@ Value bool_val(bool val) {
     return v;
 }
 
+Value native_val(NativeFn function) {
+    Value value;
+    value.type = VAL_NATIVE;
+    value.as.native = function;
+    return value;
+}
+
+Value string_val(const char *text, size_t length) {
+    Value value;
+    char *copy;
+    if (text == NULL || length > 65536) return nil_val();
+    copy = malloc(length + 1);
+    if (copy == NULL) return nil_val();
+    memcpy(copy, text, length);
+    copy[length] = '\0';
+    value.type = VAL_STRING;
+    value.as.obj = copy;
+    return value;
+}
+
+Value bytes_val(const uint8_t *data, size_t length) {
+    Value value;
+    ObjBytes *bytes;
+    if ((data == NULL && length != 0) || length > 65536) return nil_val();
+    bytes = malloc(sizeof(*bytes));
+    if (bytes == NULL) return nil_val();
+    bytes->data = malloc(length == 0 ? 1 : length);
+    if (bytes->data == NULL) { free(bytes); return nil_val(); }
+    if (length != 0) memcpy(bytes->data, data, length);
+    bytes->length = length;
+    value.type = VAL_BYTES;
+    value.as.obj = bytes;
+    return value;
+}
+
+Value array_val(size_t count, const Value *items) {
+    Value value;
+    ObjArray *array;
+    if ((items == NULL && count != 0) || count > 4096) return nil_val();
+    array = malloc(sizeof(*array));
+    if (array == NULL) return nil_val();
+    array->items = malloc((count == 0 ? 1 : count) * sizeof(Value));
+    if (array->items == NULL) { free(array); return nil_val(); }
+    if (count != 0) memcpy(array->items, items, count * sizeof(Value));
+    array->count = count;
+    value.type = VAL_ARRAY;
+    value.as.obj = array;
+    return value;
+}
+
+Value array_literal_val(size_t count, const Value *items) {
+    Value value;
+    ObjArray *array = malloc(sizeof(*array));
+    if (array == NULL) return nil_val();
+    array->items = malloc((count == 0 ? 1 : count) * sizeof(Value));
+    if (array->items == NULL) { free(array); return nil_val(); }
+    if (count != 0) memcpy(array->items, items, count * sizeof(Value));
+    array->count = count;
+    value.type = VAL_ARRAY;
+    value.as.obj = array;
+    return value;
+}
+
+Value result_val(bool ok, int code, const char *message) {
+    Value value;
+    ObjResult *result;
+    size_t length = message == NULL ? 0 : strlen(message);
+    result = malloc(sizeof(*result));
+    if (result == NULL) return nil_val();
+    result->message = malloc(length + 1);
+    if (result->message == NULL) { free(result); return nil_val(); }
+    if (length != 0) memcpy(result->message, message, length);
+    result->message[length] = '\0';
+    result->ok = ok;
+    result->code = code;
+    value.type = VAL_RESULT;
+    value.as.obj = result;
+    return value;
+}
+
+Value free_value(Value value) {
+    Value nil = nil_val();
+    if (value.as.obj == NULL) return nil;
+    switch (value.type) {
+        case VAL_STRING: free(value.as.obj); break;
+        case VAL_BYTES: { ObjBytes *bytes = value.as.obj; free(bytes->data); free(bytes); break; }
+        case VAL_ARRAY: { ObjArray *array = value.as.obj; size_t i; for (i = 0; i < array->count; ++i) free_value(array->items[i]); free(array->items); free(array); break; }
+        case VAL_RESULT: { ObjResult *result = value.as.obj; free(result->message); free(result); break; }
+        default: return value;
+    }
+    return nil;
+}
+bool value_get_field(Value object, const char *name, Value *result) {
+    ObjResult *item;
+    if (name == NULL || result == NULL || object.type != VAL_RESULT) return false;
+    item = object.as.obj;
+    if (strcmp(name, "ok") == 0) *result = bool_val(item->ok);
+    else if (strcmp(name, "code") == 0) *result = int_val(item->code);
+    else if (strcmp(name, "message") == 0) *result = string_val(item->message, strlen(item->message));
+    else return false;
+    return true;
+}
+
 Value nil_val(void) {
-    Value v;
-    v.type = VAL_NIL;
-    v.as.integer = 0;  // Zero-initialize the union for safety
-    return v;
+    Value value;
+    value.type = VAL_NIL;
+    value.as.integer = 0;
+    return value;
 }
 
 // ============================================================================
@@ -63,7 +168,22 @@ void print_value(Value val) {
             printf("nil");
             break;
         case VAL_FUNC:
-            printf("<fn>");   // Functions are opaque; just print a placeholder
+            printf("<fn>");
+            break;
+        case VAL_NATIVE:
+            printf("<native>");
+            break;
+        case VAL_STRING:
+            printf("%s", (char*)val.as.obj);
+            break;
+        case VAL_BYTES:
+            printf("<bytes>");
+            break;
+        case VAL_ARRAY:
+            printf("<array>");
+            break;
+        case VAL_RESULT:
+            printf("<result>");
             break;
     }
 }
@@ -85,7 +205,12 @@ bool is_truthy(Value val) {
             return val.as.real != 0.0;
         case VAL_BOOL:
             return val.as.boolean;
-        case VAL_NIL:
+        case VAL_FUNC:
+        case VAL_NATIVE:
+        case VAL_STRING:
+        case VAL_BYTES:
+        case VAL_ARRAY:
+        case VAL_RESULT:
             return false;
         default:
             return false;
@@ -102,6 +227,12 @@ int64_t as_int(Value val) {
         case VAL_INT:    return val.as.integer;
         case VAL_DOUBLE: return (int64_t)val.as.real;          // Truncates toward zero
         case VAL_BOOL:   return val.as.boolean ? 1 : 0;
+        case VAL_FUNC:
+        case VAL_NATIVE:
+        case VAL_STRING:
+        case VAL_BYTES:
+        case VAL_ARRAY:
+        case VAL_RESULT:
         case VAL_NIL:
         default:         return 0;
     }
@@ -113,6 +244,12 @@ double as_double(Value val) {
         case VAL_INT:    return (double)val.as.integer;
         case VAL_DOUBLE: return val.as.real;
         case VAL_BOOL:   return val.as.boolean ? 1.0 : 0.0;
+        case VAL_FUNC:
+        case VAL_NATIVE:
+        case VAL_STRING:
+        case VAL_BYTES:
+        case VAL_ARRAY:
+        case VAL_RESULT:
         case VAL_NIL:
         default:         return 0.0;
     }

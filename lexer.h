@@ -24,8 +24,10 @@ typedef enum {
     // ---- Single-character punctuation ----
     TOKEN_LEFT_PAREN, TOKEN_RIGHT_PAREN,
     TOKEN_LEFT_BRACE, TOKEN_RIGHT_BRACE,
+    TOKEN_LEFT_BRACKET, TOKEN_RIGHT_BRACKET,
     TOKEN_COMMA, TOKEN_SEMICOLON,
     TOKEN_HASH,                // #  -- prefix for database references
+    TOKEN_DOT,
 
     // ---- Arithmetic / Bitwise operators ----
     TOKEN_PLUS, TOKEN_MINUS, TOKEN_STAR, TOKEN_SLASH, TOKEN_PERCENT,
@@ -43,6 +45,7 @@ typedef enum {
     TOKEN_IDENTIFIER,   // User-defined names (variable, function names)
     TOKEN_INT,          // Integer literal  (e.g. 42)
     TOKEN_DOUBLE,       // Double literal   (e.g. 3.14)
+    TOKEN_STRING,
 
     // ---- Keywords ----
     TOKEN_VAR, TOKEN_FN, TOKEN_IF, TOKEN_ELSE, TOKEN_WHILE, TOKEN_FOR,

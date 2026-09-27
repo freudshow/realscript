@@ -25,7 +25,8 @@
 // ---------------------------------------------------------------------------
 typedef enum {
     // ---- Expression nodes ----
-    AST_LITERAL,           // Literal value (int, double, bool, nil)
+    AST_LITERAL,
+    AST_ARRAY_LITERAL,
     AST_VAR_REF,           // Variable reference (read)
     AST_ASSIGN_VAR,        // Variable assignment (write)
     AST_DB_REF_ID,         // Database read by flat index (#N)
@@ -34,7 +35,8 @@ typedef enum {
     AST_ASSIGN_DB_REF_LINK, // Database write by link-dev-reg (#(L,D,R) = val)
     AST_BINARY,            // Binary operation (e.g. a + b, a && b)
     AST_UNARY,             // Unary operation (e.g. -a, !a, ~a)
-    AST_CALL,              // Function call (e.g. foo(a, b))
+    AST_CALL,
+    AST_FIELD,
 
     // ---- Statement nodes ----
     AST_EXPR_STMT,         // Expression statement (expression followed by ;)
@@ -49,6 +51,7 @@ typedef enum {
 
 // Forward declaration so the struct can reference itself
 typedef struct AstNode AstNode;
+typedef struct ValueList { Value value; struct ValueList *next; } ValueList;
 
 // ---------------------------------------------------------------------------
 // AstNodeList -- singly-linked list of child nodes
@@ -76,8 +79,11 @@ struct AstNode {
     AstNodeType type;   // Which kind of node this is
     int line;           // Source line (for error messages)
     union {
-        // AST_LITERAL                 → a compile-time constant Value
+        // AST_LITERAL -> compile-time value
         Value literal;
+
+        // AST_ARRAY_LITERAL -> literal item list
+        struct { ValueList *items; } array_literal;
 
         // AST_VAR_REF and AST_VAR_DECL share this layout:
         //   name         → variable name (heap-allocated copy)
@@ -137,6 +143,7 @@ struct AstNode {
             char* callee;           // Function name (heap-allocated)
             AstNodeList* arguments; // Linked list of argument expressions
         } call;
+        struct { char* name; AstNode* object; } field;
 
         // AST_EXPR_STMT and AST_RETURN share this layout
         struct {
@@ -184,6 +191,7 @@ struct AstNode {
 
 // Expression constructors
 AstNode* make_literal(Value val, int line);
+AstNode* make_array_literal(ValueList *items, int line);
 AstNode* make_var_ref(const char* name, int length, int line);
 AstNode* make_assign_var(const char* name, int length, AstNode* value, int line);
 AstNode* make_db_ref_id(int realNo, int line);
@@ -192,6 +200,7 @@ AstNode* make_db_ref_link(int linkNo, int devNo, int regNo, int line);
 AstNode* make_assign_db_ref_link(int linkNo, int devNo, int regNo, AstNode* value, int line);
 AstNode* make_binary(TokenType op, AstNode* left, AstNode* right, int line);
 AstNode* make_unary(TokenType op, AstNode* operand, int line);
+AstNode* make_field(const char* name, int length, AstNode* object, int line);
 AstNode* make_call(const char* callee, int length, AstNodeList* arguments, int line);
 
 // Statement constructors
@@ -208,6 +217,9 @@ AstNode* make_return(AstNode* expr, int line);
 // Destructors  (free entire AST sub-trees recursively)
 // ---------------------------------------------------------------------------
 void free_ast(AstNode* node);
+ValueList* copy_value_list(const ValueList *items);
+void free_value_list(ValueList *items);
+void free_value_list(ValueList *items);
 void free_ast_list(AstNodeList* list);
 void free_param_list(ParamList* list);
 

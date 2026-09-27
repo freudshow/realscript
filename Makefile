@@ -14,7 +14,7 @@ CFLAGS = -Wall -Wextra -std=c99 -g
 TARGET = realscript
 
 # All source files in the project
-SRCS = db.c value.c lexer.c ast.c parser.c compiler.c vm.c main.c
+SRCS = db.c value.c lexer.c ast.c parser.c compiler.c ttu_script_runtime.c vm.c main.c
 OBJS = $(SRCS:.c=.o)
 
 # Default target: build the executable

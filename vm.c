@@ -14,6 +14,7 @@
 // ============================================================================
 
 #include "vm.h"
+#include "ttu_script_runtime.h"
 #include "db.h"
 #include <stdio.h>
 #include <stdarg.h>
@@ -30,17 +31,33 @@
 // init_vm — initialise a fresh VM (empty stack, no frames, nil globals)
 // ============================================================================
 void init_vm(VM* vm) {
-    vm->stackTop = vm->stack;       // Empty stack
+    vm->host = NULL;
+    vm->host_context = NULL;
+    vm->capabilities = 0;
+    vm->instruction_budget = 100000;
+    vm->executed_instructions = 0;
+    vm->script_name = NULL;
+    vm->stackTop = vm->stack;
     vm->frameCount = 0;             // No call frames
     for (int i = 0; i < 512; i++) {
         vm->globals[i] = nil_val(); // All globals initially nil
     }
 }
 
-// ============================================================================
-// free_vm — clean up (currently a no-op since all resources are owned by
-//           the ObjFunction tree, which main.c frees separately)
-// ============================================================================
+void init_vm_with_host(VM* vm, const TTUScriptHostAPI* host, void* host_context,
+                       uint32_t capabilities, const char* script_name)
+{
+    init_vm(vm);
+    vm->host = host;
+    vm->host_context = host_context;
+    vm->capabilities = capabilities;
+    vm->script_name = script_name;
+}
+
+void vm_set_instruction_budget(VM* vm, int budget) {
+    if (vm != NULL && budget > 0) vm->instruction_budget = budget;
+}
+
 void free_vm(VM* vm) {
     (void)vm;
     // All heap-allocated resources (functions/chunks) are owned by the
@@ -199,11 +216,9 @@ static void disassemble_instruction(Chunk* chunk, int offset) {
             printf("%-16s -> %d\n", "OP_LOOP", offset + 3 - jump);
             break;
         }
-        case OP_CALL: {
-            uint8_t args = chunk->code[offset + 1];
-            printf("%-16s %4d args\n", "OP_CALL", args);
-            break;
-        }
+        case OP_CALL_NATIVE: printf("OP_CALL_NATIVE\n"); break;
+        case OP_GET_FIELD: printf("OP_GET_FIELD\n"); break;
+        case OP_INDEX: printf("OP_INDEX\n"); break;
         case OP_RETURN:   printf("OP_RETURN\n"); break;
         default:          printf("Unknown opcode %d\n", instruction); break;
     }
@@ -237,6 +252,11 @@ static InterpretResult run(VM* vm) {
     // Main fetch-decode-execute loop
     // ====================================================================
     for (;;) {
+        if (vm->instruction_budget <= 0) {
+            runtime_error(vm, "Instruction budget exceeded.");
+            return INTERPRET_RUNTIME_ERROR;
+        }
+        vm->instruction_budget--;
 #if DEBUG_TRACE_EXECUTION
         // Print stack contents
         printf("          ");
@@ -399,8 +419,65 @@ static InterpretResult run(VM* vm) {
             // ------------------------------------------------------------
             // Function call
             // ------------------------------------------------------------
-            case OP_CALL: {
-                uint8_t argCount = READ_BYTE();
+        case OP_CALL_NATIVE: {
+            uint16_t id = READ_SHORT();
+            uint8_t argc = READ_BYTE();
+            const TTUNativeFunction* native = ttu_script_get_native(id);
+            Value args[256];
+            Value result;
+            int i;
+            if (native == NULL || argc < native->min_arity || argc > native->max_arity) {
+                runtime_error(vm, "Invalid native call id or argument count.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            if ((vm->capabilities & native->capability) != native->capability) {
+                runtime_error(vm, "Native capability denied: %s.", native->name);
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            for (i = 0; i < argc; ++i) args[i] = vm->stackTop[-argc + i];
+            result = native->function(vm, argc, args);
+            vm->stackTop -= argc;
+            push(vm, result);
+            break;
+        }
+        case OP_GET_FIELD: {
+            uint8_t field_index = READ_BYTE();
+            if (field_index >= frame->function->chunk.valueCount) {
+                runtime_error(vm, "Invalid field constant index.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            Value result;
+            Value object = pop(vm);
+            Value field_name = frame->function->chunk.values[field_index];
+            if (field_name.type != VAL_STRING || !value_get_field(object, field_name.as.obj, &result)) {
+                runtime_error(vm, "Unknown field access.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            free_value(object);
+            push(vm, result);
+            break;
+        }
+        case OP_INDEX: {
+            Value index = pop(vm);
+            Value object = pop(vm);
+            int64_t i = as_int(index);
+            Value result = nil_val();
+            if (object.type == VAL_ARRAY) {
+                ObjArray* array = object.as.obj;
+                if (i < 0 || (uint64_t)i >= array->count) { free_value(object); runtime_error(vm, "Array index out of bounds."); return INTERPRET_RUNTIME_ERROR; }
+                result = array->items[i];
+            } else if (object.type == VAL_BYTES) {
+                ObjBytes* bytes = object.as.obj;
+                if (i < 0 || (uint64_t)i >= bytes->length) { free_value(object); runtime_error(vm, "Bytes index out of bounds."); return INTERPRET_RUNTIME_ERROR; }
+                result = int_val(bytes->data[i]);
+            } else { free_value(object); runtime_error(vm, "Value is not indexable."); return INTERPRET_RUNTIME_ERROR; }
+            push(vm, result);
+            break;
+        }
+
+        case OP_CALL: {
+            uint8_t argCount = READ_BYTE();
+
                 // The callee function object is argCount positions below top
                 Value callee = peek(vm, argCount);
 
@@ -468,6 +545,9 @@ static InterpretResult run(VM* vm) {
 // Sets up the initial call frame for the compiled script and calls run().
 // ============================================================================
 InterpretResult interpret(VM* vm, ObjFunction* function) {
+    vm->instruction_budget = vm->instruction_budget > 0 ? vm->instruction_budget : 100000;
+    vm->executed_instructions = 0;
+    vm->instruction_budget = vm->instruction_budget > 0 ? vm->instruction_budget : 100000;
     // Push the function object as the stack bottom (frame slot 0)
     push(vm, (Value){VAL_FUNC, {.obj = function}});
     CallFrame* frame = &vm->frames[vm->frameCount++];

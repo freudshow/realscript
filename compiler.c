@@ -13,6 +13,7 @@
 // ============================================================================
 
 #include "compiler.h"
+#include "ttu_script_runtime.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -119,6 +120,8 @@ void free_chunk(Chunk* chunk) {
     for (int i = 0; i < chunk->valueCount; i++) {
         if (chunk->values[i].type == VAL_FUNC) {
             free_function((ObjFunction*)chunk->values[i].as.obj);
+        } else {
+            free_value(chunk->values[i]);
         }
     }
     free(chunk->values);
@@ -259,7 +262,26 @@ static void compile_node(Compiler* compiler, AstNode* node);
 // ============================================================================
 // compile_node -- recursive AST-to-bytecode compilation
 //
-// This is the heart of the compiler.  Each case handles a different
+static int emit_native_call(Compiler* compiler, const char* name, AstNodeList* args, int line) {
+    int id = resolve_native(name);
+    int argc = 0;
+    AstNodeList* arg = args;
+    const TTUNativeFunction* fn;
+    if (id < 0 || id > 65535) { fprintf(stderr, "[Compiler Error] Unknown native '%s'.\\n", name); return -1; }
+    fn = ttu_script_get_native(id);
+    while (arg != NULL) { argc++; arg = arg->next; }
+    if (fn == NULL || argc < fn->min_arity || argc > fn->max_arity) {
+        fprintf(stderr, "[Compiler Error] Native '%s' argument count invalid.\\n", name); return -1;
+    }
+    arg = args;
+    while (arg != NULL) { compile_node(compiler, arg->node); arg = arg->next; }
+    write_chunk(&compiler->function->chunk, OP_CALL_NATIVE, line);
+    write_chunk(&compiler->function->chunk, (uint8_t)(id >> 8), line);
+    write_chunk(&compiler->function->chunk, (uint8_t)id, line);
+    write_chunk(&compiler->function->chunk, (uint8_t)argc, line);
+    return 0;
+}
+
 // AstNodeType and emits the appropriate sequence of opcodes.
 // ============================================================================
 static void compile_node(Compiler* compiler, AstNode* node) {
@@ -267,8 +289,6 @@ static void compile_node(Compiler* compiler, AstNode* node) {
 
     switch (node->type) {
 
-        // ================================================================
-        // AST_LITERAL — push a constant value onto the stack
         // ================================================================
         case AST_LITERAL: {
             if (node->as.literal.type == VAL_NIL) {
@@ -278,6 +298,16 @@ static void compile_node(Compiler* compiler, AstNode* node) {
             } else {
                 emit_constant(compiler, node->as.literal, node->line);
             }
+            break;
+        }
+
+        case AST_ARRAY_LITERAL: {
+            ValueList* list = copy_value_list(node->as.array_literal.items);
+            ValueList* item;
+            for (item = list; item != NULL; item = item->next)
+                compile_node(compiler, make_literal(item->value, node->line));
+            emit_constant(compiler, array_literal_val(0, NULL), node->line);
+            free_value_list(list);
             break;
         }
 
@@ -441,11 +471,20 @@ static void compile_node(Compiler* compiler, AstNode* node) {
         }
 
         // ================================================================
-        // AST_CALL — function call
-        //
-        // Emits: push callee, push args..., OP_CALL N
-        // ================================================================
+        case AST_FIELD: {
+            compile_node(compiler, node->as.field.object);
+            int field_index = add_constant(&compiler->function->chunk, string_val(node->as.field.name, strlen(node->as.field.name)));
+            emit_b(OP_GET_FIELD);
+            emit_b((uint8_t)field_index);
+            break;
+        }
+
         case AST_CALL: {
+            if (resolve_native(node->as.call.callee) >= 0) {
+                if (emit_native_call(compiler, node->as.call.callee, node->as.call.arguments, node->line) != 0)
+                    fprintf(stderr, "[Compiler Error] Failed compiling native call.\\n");
+                break;
+            }
             int argIndex = resolve_local(compiler, node->as.call.callee);
             if (argIndex != -1) {
                 emit_b(OP_GET_LOCAL);
